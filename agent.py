@@ -1,17 +1,16 @@
 """
 agent.py
 --------
-Stable Groq + Tavily Agent (NO tool parser crash)
+Python 3.13 + Streamlit Cloud SAFE
+Groq + Tavily (no LangChain agents)
 """
 
 import os
 import requests
 from datetime import datetime, timedelta
 
-from langchain.agents import initialize_agent, AgentType
-from langchain_core.tools import tool
-from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_groq import ChatGroq
+from langchain_community.tools.tavily_search import TavilySearchResults
 
 # ===============================
 # ENV CHECK
@@ -23,57 +22,50 @@ if not os.getenv("TAVILY_API_KEY"):
     raise RuntimeError("TAVILY_API_KEY missing")
 
 # ===============================
-# TOOLS
+# LLM
 # ===============================
-@tool
-def get_current_datetime() -> str:
-    """Get current time in IST."""
+llm = ChatGroq(
+    model_name="llama-3.3-70b-versatile",
+    temperature=0.7,
+    max_tokens=1024,
+)
+
+tavily = TavilySearchResults(max_results=3)
+
+# ===============================
+# TOOLS (MANUAL)
+# ===============================
+def get_time():
     now = datetime.utcnow() + timedelta(hours=5, minutes=30)
     return now.strftime("%Y-%m-%d %H:%M:%S (IST)")
 
 
-@tool
-def get_weather(city: str) -> str:
-    """Get weather info."""
+def get_weather(city: str):
     try:
         r = requests.get(f"https://wttr.in/{city}?format=3", timeout=10)
         return r.text
     except Exception:
-        return "Weather service unavailable."
-
-tools = [
-    get_current_datetime,
-    get_weather,
-    TavilySearchResults(max_results=3),
-]
+        return "Weather unavailable."
 
 # ===============================
-# AGENT
+# ROUTER CHAT
 # ===============================
-def create_agent():
-    llm = ChatGroq(
-        model_name="llama-3.3-70b-versatile",
-        temperature=0.7,
-        max_tokens=1024,
-    )
+def chat(user_input: str) -> str:
+    text = user_input.lower()
 
-    agent = initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.OPENAI_FUNCTIONS,  # ✅ IMPORTANT
-        verbose=False,
-        handle_parsing_errors=True,
-    )
+    # Tool routing (simple & stable)
+    if "time" in text or "date" in text:
+        return get_time()
 
-    return agent
+    if "weather" in text:
+        city = text.replace("weather", "").strip() or "Delhi"
+        return get_weather(city)
 
-# ===============================
-# CHAT
-# ===============================
-def chat(user_input: str, agent):
-    try:
-        response = agent.run(user_input)
-        return response
-    except Exception as e:
-        return f"⚠️ Error: {str(e)}"
+    if "search" in text or "news" in text:
+        results = tavily.invoke({"query": user_input})
+        return results[0]["content"] if results else "No results found."
+
+    # Default: LLM
+    response = llm.invoke(user_input)
+    return response.content
 
