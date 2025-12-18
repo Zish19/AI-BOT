@@ -1,16 +1,10 @@
 """
-Agent.py
----------
-LangChain Agent using:
-- Groq (LLM)
-- Tavily (Web Search)
-- Custom tools (datetime, weather)
-Compatible with Streamlit Cloud
+agent.py
+--------
+LangChain Agent using Groq + Tavily
+Works on Streamlit Cloud
 """
 
-# ===============================
-# Imports
-# ===============================
 import os
 import requests
 from datetime import datetime, timedelta
@@ -23,16 +17,16 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_groq import ChatGroq
 
 # ===============================
-# ENVIRONMENT VALIDATION
+# ENV VALIDATION (CRITICAL)
 # ===============================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 if not GROQ_API_KEY:
-    raise RuntimeError("❌ GROQ_API_KEY missing. Add it to Streamlit Secrets.")
+    raise RuntimeError("GROQ_API_KEY missing (check Streamlit Secrets)")
 
 if not TAVILY_API_KEY:
-    raise RuntimeError("❌ TAVILY_API_KEY missing. Add it to Streamlit Secrets.")
+    raise RuntimeError("TAVILY_API_KEY missing (check Streamlit Secrets)")
 
 # ===============================
 # TIMEZONE SUPPORT (IST)
@@ -45,46 +39,32 @@ except ImportError:
 # ===============================
 # TOOLS
 # ===============================
-
 @tool
 def get_current_datetime() -> str:
-    """Return current date and time in Indian Standard Time (IST)."""
-    try:
-        if ZoneInfo:
-            now = datetime.now(ZoneInfo("Asia/Kolkata"))
-        else:
-            now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-        return now.strftime("%Y-%m-%d %H:%M:%S (IST)")
-    except Exception as e:
-        return f"Error fetching time: {str(e)}"
+    """Return current date & time in IST."""
+    if ZoneInfo:
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    else:
+        now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    return now.strftime("%Y-%m-%d %H:%M:%S (IST)")
 
 
 @tool
 def get_weather(city: str) -> str:
-    """Get current weather for a city using wttr.in (no API key required)."""
+    """Get weather using wttr.in (no API key needed)."""
     try:
         url = f"https://wttr.in/{city}?format=j1"
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return f"Could not fetch weather for {city}"
-
-        data = res.json()
-        current = data["current_condition"][0]
-        desc = current["weatherDesc"][0]["value"]
-        temp = current["temp_C"]
-        feels = current["FeelsLikeC"]
-        humidity = current["humidity"]
-
+        r = requests.get(url, timeout=10)
+        data = r.json()["current_condition"][0]
         return (
-            f"Weather in {city}: {desc}, "
-            f"Temperature: {temp}°C (feels like {feels}°C), "
-            f"Humidity: {humidity}%"
+            f"Weather in {city}: {data['weatherDesc'][0]['value']}, "
+            f"{data['temp_C']}°C (feels like {data['FeelsLikeC']}°C)"
         )
-    except Exception as e:
-        return f"Weather error: {str(e)}"
+    except Exception:
+        return "Unable to fetch weather right now."
 
 # ===============================
-# GLOBAL CHAT MEMORY (lightweight)
+# MEMORY
 # ===============================
 chat_history = []
 
@@ -92,89 +72,55 @@ chat_history = []
 # AGENT CREATION
 # ===============================
 def create_agent():
-    """Create and return the AgentExecutor."""
-
     llm = ChatGroq(
-        model_name="llama-3.3-70b-versatile",  # ✅ Groq-supported
+        model_name="llama-3.3-70b-versatile",
         temperature=0.7,
         max_tokens=1024,
-        timeout=30,
-        max_retries=2,
     )
 
-    tavily_tool = TavilySearchResults(
-        max_results=3,
-        search_depth="basic",
-        include_answer=True,
-        include_raw_content=False,
-    )
+    tavily = TavilySearchResults(max_results=3)
 
-    tools = [get_current_datetime, get_weather, tavily_tool]
+    tools = [get_current_datetime, get_weather, tavily]
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            (
-                "system",
-                """
-You are a helpful AI assistant.
-You have access to tools for:
-- Current date & time (IST)
-- Weather lookup
-- Web search (Tavily)
-
-Use tools when required.
-Be clear, concise, and conversational.
-""",
-            ),
-            MessagesPlaceholder(variable_name="chat_history"),
+            ("system", "You are a helpful AI assistant with tools."),
+            MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
+            MessagesPlaceholder("agent_scratchpad"),
         ]
     )
 
     agent = create_tool_calling_agent(llm, tools, prompt)
 
-    executor = AgentExecutor(
+    return AgentExecutor(
         agent=agent,
         tools=tools,
         verbose=False,
         handle_parsing_errors=True,
-        max_iterations=5,
     )
 
-    return executor
-
 # ===============================
-# CHAT FUNCTION (USED BY STREAMLIT)
+# CHAT FUNCTION
 # ===============================
-def chat(user_input: str, agent_executor):
-    """Run one chat turn and update memory."""
+def chat(user_input: str, executor):
     global chat_history
 
-    formatted_history = []
-    for role, content in chat_history:
+    history_msgs = []
+    for role, msg in chat_history:
         if role == "human":
-            formatted_history.append(HumanMessage(content=content))
-        elif role == "assistant":
-            formatted_history.append(AIMessage(content=content))
+            history_msgs.append(HumanMessage(content=msg))
+        else:
+            history_msgs.append(AIMessage(content=msg))
 
-    try:
-        result = agent_executor.invoke(
-            {
-                "input": user_input,
-                "chat_history": formatted_history,
-            }
-        )
+    result = executor.invoke(
+        {"input": user_input, "chat_history": history_msgs}
+    )
 
-        output = result.get("output", "No response generated.")
-
-    except Exception as e:
-        output = f"⚠️ Error: {str(e)}"
+    output = result.get("output", "No response.")
 
     chat_history.append(("human", user_input))
     chat_history.append(("assistant", output))
-
-    # keep last 10 exchanges only
     chat_history = chat_history[-20:]
 
     return output
